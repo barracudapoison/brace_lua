@@ -1,0 +1,259 @@
+let current_path = ""
+
+define MAX_TITLE_LENGTH 5
+define TITLE_BAR_OFFSET 1
+
+$[
+local LOG_FILE = "/debug.log"
+local LOG_LEVELS = { INFO = "INFO", WARN = "WARN", ERROR = "ERROR" }
+
+local function log(message, level)
+    level = level or LOG_LEVELS.INFO
+
+    local timestamp = os.date("%Y-%m-%d %H:%M:%S")
+    local entry = string.format("[%s] [%s] %s\n", timestamp, level, message)
+
+    local file = fs.open(LOG_FILE, "a")
+    if not file then
+        error("Could not open log file: " .. LOG_FILE)
+    end
+
+    file.write(entry)
+    file.close()
+end
+
+local function getParentPath(path)
+    -- Remove any trailing slash
+    path = path:gsub("/$", "")
+
+    -- Find the last slash and return everything before it
+    local parent = path:match("^(.*)/[^/]+$")
+
+    -- If no slash found, we're already at the root
+    return parent or "/"
+end
+
+local function getDirectoryContents(path)
+    local contents = {}
+
+    if not fs.exists(path) then
+        error("Path does not exist: " .. path)
+    end
+
+    if not fs.isDir(path) then
+        error("Path is not a directory: " .. path)
+    end
+
+    local entries = fs.list(path)
+
+    for _, name in ipairs(entries) do
+        local fullPath = fs.combine(path, name)
+        local isDir = fs.isDir(fullPath)
+        local extension = nil
+
+        -- Extract extension only for files, not directories
+        if not isDir then
+            extension = name:match("%.([^%.]+)$")
+        end
+
+        table.insert(contents, {
+            name = name,
+            type = isDir and "directory" or "file",
+            extension = extension
+        })
+    end
+
+    return contents
+end
+
+
+local function sortContents(contents)
+    local sorted = {}
+    for _, entry in ipairs(contents) do
+        table.insert(sorted, entry)
+    end
+
+    table.sort(sorted, function(a, b)
+        if a.type ~= b.type then
+            return a.type == "directory"
+        end
+        return a.name:lower() < b.name:lower()
+    end)
+
+    return sorted
+end
+
+]$
+
+function init() {
+
+	term.setBackgroundColor(colors.black)
+	term.clear() 
+
+	
+
+}
+
+function drawTitleBar() {
+
+	term.setCursorPos(1,1)
+	term.setBackgroundColor(colors.red)
+	term.setTextColor(colors.white)
+	term.clearLine()
+	term.write("blua interface v1.0" )
+
+}
+
+function displayNavLine( x, y, type, extension, title ) {
+
+	term.setBackgroundColor(colors.black)
+	term.setCursorPos(x,y)
+
+	let is_folder = false
+
+	if (type == "directory") {
+		term.setTextColor(colors.yellow)
+		is_folder = true
+	} elseif extension == "lua" {
+		term.setTextColor(colors.pink)
+	} elseif extension == "blua" {
+		term.setTextColor(colors.cyan)
+	} else {
+		term.setTextColor(colors.gray)
+	}
+
+	if is_folder == true {
+		term.write(" > ")
+		term.setTextColor(colors.white)
+	} else {
+		term.write(" ~ ")
+	}
+	term.write(" " .. (title or " "))
+
+}
+
+let path_contents = {}
+
+function displayContents() {
+
+
+	term.setBackgroundColor(colors.black)
+	term.clear()
+	drawTitleBar()
+
+	path_contents = getDirectoryContents(current_path)
+
+	path_contents = sortContents(path_contents)
+
+	let d_x_index = 1
+	let d_y_index = 2
+
+	if not (current_path == "") {
+		displayNavLine( d_x_index, 2, "directory", nil, ".." )
+	}
+
+	for i=1, #path_contents {
+		displayNavLine( d_x_index, d_y_index + TITLE_BAR_OFFSET , path_contents[i].type, path_contents[i].extension, path_contents[i].name )
+		d_y_index++
+	}
+
+}
+
+let running = true 
+
+init()
+displayContents()
+
+function continueOnKeyPress() {
+
+	term.write("Press any key to continue.")
+	os.pullEvent("key")
+	displayContents()
+
+}
+
+local function replaceExtension(filename, newExtension) {
+    -- Strip leading dot from new extension if provided (e.g. ".lua" -> "lua")
+    newExtension = newExtension:gsub("^%.", "")
+
+    -- If file has no extension, just append the new one
+    if not filename:match("%.([^%.]+)$") {
+        return filename .. "." .. newExtension
+	}
+
+    return filename:gsub("%.([^%.]+)$", "." .. newExtension)
+}
+
+function cleanDisplay() {
+	term.clear()
+	term.setCursorPos(1,1)
+}
+
+function executeLua(path) {
+
+	cleanDisplay()
+	os.run({}, path)
+
+	continueOnKeyPress()
+	
+}
+
+function executeBlua(path) {
+
+	cleanDisplay()
+	let build_target_path = replaceExtension(path, ".lua")
+	
+
+	if not (os.run({}, "bracelua.lua", path, build_target_path)) {
+		continueOnKeyPress()
+		return false
+	} else {
+		cleanDisplay()
+	}
+
+	os.run({}, build_target_path)
+	continueOnKeyPress()
+
+}
+
+while running {
+
+	event, d1, d2, d3, d4 = os.pullEvent()
+	--os.run({},"test.lua")
+
+	if event == "mouse_click" {
+		term.setCursorPos(20,20)
+		if d2 >= 3 and d2 < 10 and d3 >= 2 and d3 < 3+#path_contents {
+			if d3 == 2 and not (current_path == "" or current_path == nil) {
+				current_path = getParentPath(current_path)
+				displayContents()
+			} else {
+				let item = path_contents[d3-2]
+				if item.type == "directory" {
+					current_path = current_path .. "/" .. item.name
+					displayContents()
+
+				} else {
+
+					if item.extension == "lua" {
+
+						executeLua( current_path .. "/" .. item.name )
+
+					} elseif item.extension == "blua" {
+
+						executeBlua( current_path .. "/" .. item.name )
+
+					}
+
+				}
+			}
+		}
+	} elseif event == "key" {
+		if d1 == keys.enter {
+
+			running = false
+
+		}
+	}
+
+}
