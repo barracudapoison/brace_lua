@@ -1,0 +1,10 @@
+-- bmake
+return {
+  files = {
+    interface  = { src = "src/interface.blua",  out = "out/interface.lua"  },
+  },
+  targets = {
+    default = { "interface" },  -- references file names
+    all     = { "__all__" },
+  }
+}

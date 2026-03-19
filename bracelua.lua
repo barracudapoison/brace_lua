@@ -398,17 +398,27 @@ local function transpile(src)
   local lastMeaningful = nil   -- last non-whitespace/comment token
   local braceDepth = 0
   local blockStack = {}
+  -- Track paren nesting so we can tell whether a { is inside a function
+  -- call's argument list (where it must be a table) vs. a block head.
+  local parenDepth = 0         -- total ( ) depth
+  local pendingParenDepth = 0  -- parenDepth at the time pending was set
+  -- Stack of saved `pending` values — when we enter a function-call paren
+  -- deeper than the condition paren, we save pending, clear it for the
+  -- duration of the call args, then restore it when the paren closes.
+  local pendingSaveStack = {}
 
   local function isBlockOpen()
     if not pending then return false end
     if not lastMeaningful then return false end
-    local lm = lastMeaningful
-    if lm.type == TK.RPAREN then return true end
-    if lm.type == TK.KEYWORD and
-       (lm.value == 'else' or lm.value == 'repeat' or lm.value == 'do') then
-      return true
-    end
-    return false
+    -- A { is a block opener whenever a block keyword is pending.
+    -- The only time { is a table constructor is when pending is nil.
+    -- This covers all for loop forms:
+    --   for i = 1, 10 {         (lastMeaningful is a number)
+    --   for k, v in pairs(t) {  (lastMeaningful is an ident / `)`  )
+    --   for i = t[1], t[2] {    (lastMeaningful is `]`)
+    -- As well as if/while/function heads ending in `)`, and bare
+    -- else/repeat/do keywords.
+    return true
   end
 
   local function emit(s) out[#out+1] = s end
@@ -416,8 +426,39 @@ local function transpile(src)
   for idx = 1, n do
     local tok = tokens[idx]
 
-    if tok.type == TK.SPACE or tok.type == TK.NEWLINE or tok.type == TK.COMMENT then
+    if tok.type == TK.SPACE or tok.type == TK.COMMENT then
       emit(tok.value)
+
+    elseif tok.type == TK.NEWLINE then
+      emit(tok.value)
+      -- A newline resets pending UNLESS we just saw an opening keyword
+      -- and haven't hit the { yet. We allow pending to survive one newline
+      -- (e.g. `if condition\n{`) but reset it on the second, and also reset
+      -- it immediately if the newline comes after a complete statement token
+      -- (ident, number, string, ], )) that is NOT a block head.
+      -- Simplest safe rule: reset pending on newline only when lastMeaningful
+      -- is something that cannot be the end of a block head continuation:
+      --   i.e. NOT an operator, NOT a keyword that keeps expressions going.
+      if pending and lastMeaningful then
+        local lm = lastMeaningful
+        -- These token types/values mean we're mid-expression; keep pending.
+        local midExpr = (lm.type == TK.OP or lm.type == TK.COMMA
+                         or lm.type == TK.DOTDOT or lm.type == TK.DOTDOTDOT
+                         or (lm.type == TK.KEYWORD and (
+                               lm.value == 'not' or lm.value == 'and'
+                               or lm.value == 'or' or lm.value == 'in')))
+        if not midExpr then
+          -- Also keep pending if lastMeaningful is one of the block keywords
+          -- themselves (just emitted, { not yet seen)
+          local isBlockKw = (lm.type == TK.KEYWORD and (
+            lm.value == 'if' or lm.value == 'elseif' or lm.value == 'else'
+            or lm.value == 'while' or lm.value == 'for' or lm.value == 'do'
+            or lm.value == 'repeat' or lm.value == 'function'))
+          if not isBlockKw then
+            pending = nil
+          end
+        end
+      end
 
     elseif tok.type == TK.EOF then
       -- done
@@ -455,7 +496,22 @@ local function transpile(src)
         local frame = table.remove(blockStack)
         braceDepth = braceDepth - 1
         if not frame.isRepeat then
-          emit(frame.closeWord)   -- emit "end"
+          -- Peek ahead past whitespace/newlines/comments to see if the next
+          -- meaningful token is `elseif` or `else`. If so, suppress `end`
+          -- because elseif/else continue the same if-block in Lua.
+          local nextMeaningful = nil
+          for peekIdx = idx + 1, n do
+            local pt = tokens[peekIdx]
+            if pt.type ~= TK.SPACE and pt.type ~= TK.NEWLINE and pt.type ~= TK.COMMENT then
+              nextMeaningful = pt
+              break
+            end
+          end
+          local suppress = nextMeaningful and nextMeaningful.type == TK.KEYWORD
+                           and (nextMeaningful.value == 'elseif' or nextMeaningful.value == 'else')
+          if not suppress then
+            emit(frame.closeWord)   -- emit "end"
+          end
         end
         -- For repeat blocks the } is dropped; `until <cond>` follows naturally
         lastMeaningful = tok
@@ -467,8 +523,8 @@ local function transpile(src)
 
     elseif tok.type == TK.KEYWORD then
       local v = tok.value
-      if     v == 'if' or v == 'elseif'  then pending = 'then'
-      elseif v == 'while' or v == 'for'  then pending = 'do'
+      if     v == 'if' or v == 'elseif'  then pending = 'then'; pendingParenDepth = parenDepth
+      elseif v == 'while' or v == 'for'  then pending = 'do';   pendingParenDepth = parenDepth
       elseif v == 'function' then
         pending = 'function'
         -- Auto-local: prepend `local` unless preceded by local/let/global/glet
@@ -484,7 +540,12 @@ local function transpile(src)
       elseif v == 'local'                then -- keep existing pending (for `local function`)
       elseif v == 'let'                  then -- like local, keep pending for `let function`
       elseif v == 'glet'                 then pending = nil  -- global, emits nothing
-      else                                    pending = nil
+      -- Expression keywords: `not`, `and`, `or`, `true`, `false`, `nil` can all
+      -- appear inside a block head condition — do NOT reset pending for these.
+      elseif v == 'not' or v == 'and' or v == 'or'
+          or v == 'true' or v == 'false' or v == 'nil'
+          or v == 'in'                          then -- keep pending
+      else                                           pending = nil
       end
       -- let -> local,  glet -> nothing (global assignment)
       if     v == 'let'  then emit('local')
@@ -566,10 +627,32 @@ local function transpile(src)
       lastMeaningful = tok
 
     else
-      -- Reset pending only on semicolons; leave it alive through expressions
+      -- Track parenthesis depth
+      if tok.type == TK.LPAREN then
+        parenDepth = parenDepth + 1
+        -- If we descend into a call paren deeper than the condition paren,
+        -- save pending and clear it so { inside the args = table, not block.
+        if parenDepth > pendingParenDepth + 1 then
+          pendingSaveStack[#pendingSaveStack+1] = pending
+          pending = nil
+        else
+          -- This is the condition paren itself (e.g. the `(` in `if (...)`)
+          -- push nil so the stack stays balanced
+          pendingSaveStack[#pendingSaveStack+1] = false
+        end
+      elseif tok.type == TK.RPAREN then
+        -- Restore pending if we saved it when opening this paren
+        local saved = table.remove(pendingSaveStack)
+        if saved then
+          pending = saved
+          -- Also restore pendingParenDepth to what it was
+          pendingParenDepth = parenDepth - 1
+        end
+        parenDepth = parenDepth - 1
+      end
+      -- Reset pending on semicolons
       if tok.type == TK.SEMICOLON then pending = nil end
-      -- `global` before `function`: swallow it silently; the function handler
-      -- checks lastMeaningful.value == 'global' to skip auto-local.
+      -- `global` before `function`: swallow it silently
       if tok.type == TK.IDENT and tok.value == 'global' then
         lastMeaningful = tok  -- record it but don't emit
       else
@@ -690,10 +773,23 @@ local function main(args)
   end
 end
 
--- ComputerCraft: shell global exists; standard Lua: arg table
+-- Entry point:
+--   shell present (normal CC)          -> main({ ... })
+--   no shell but fs present (os.run)   -> main({ ... })  varargs from os.run
+--   standard Lua with arg table        -> main(arg)
+--   required as library                -> do nothing, return BraceLua
+local _args = { ... }
 if shell then
-  main({ ... })
+  -- Normal CC shell execution
+  main(_args)
+elseif fs then
+  -- Loaded via os.run({}, "bracelua.lua", ...) from a custom shell.
+  -- The varargs are the arguments passed after the filename in os.run().
+  if #_args > 0 then
+    main(_args)
+  end
 elseif arg and arg[0] then
+  -- Standard Lua command line
   main(arg)
 end
 
