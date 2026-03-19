@@ -1,5 +1,7 @@
 # brace_lua
 lua preprocessor/transpiler that adds some js looking syntactic sugar
+I am well aware that this project is a bit of a mess, but it's a lovely mess
+  and makes ComputerCraft more bearable.
 ---
 replaces all instances of PI with constant
 ```c++
