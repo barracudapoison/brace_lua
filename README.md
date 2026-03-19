@@ -40,7 +40,7 @@ global function something() { return }
 uses braces for cleaner control flow
 ```js
 if (x == 2) {
-  print("no more 'then' or 'end' thank you)
+  print("no more 'then' or 'end' thank you")
 }
 ```
 ---
